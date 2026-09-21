@@ -22,9 +22,15 @@ import io
 import re
 
 import streamlit as st
+import torch
 from PIL import Image
 from gtts import gTTS
-from transformers import pipeline, set_seed
+from transformers import (
+    BlipForConditionalGeneration,
+    BlipProcessor,
+    pipeline,
+    set_seed,
+)
 
 # --------------------------------------------------------------------------- #
 # Configuration constants
@@ -44,13 +50,20 @@ RANDOM_SEED = 42
 # --------------------------------------------------------------------------- #
 
 @st.cache_resource(show_spinner=False)
-def load_captioning_pipeline():
-    """Load and cache the Hugging Face image-to-text (captioning) pipeline.
+def load_captioning_model():
+    """Load and cache the BLIP captioning model and its processor.
+
+    We load the model classes directly instead of using a Transformers
+    ``pipeline`` because the ``image-to-text`` pipeline task was removed
+    in Transformers v5.
 
     Returns:
-        transformers.Pipeline: A pipeline that turns a PIL image into a caption.
+        tuple: (processor, model) ready for image captioning.
     """
-    return pipeline("image-to-text", model=CAPTION_MODEL_NAME)
+    processor = BlipProcessor.from_pretrained(CAPTION_MODEL_NAME)
+    model = BlipForConditionalGeneration.from_pretrained(CAPTION_MODEL_NAME)
+    model.eval()
+    return processor, model
 
 
 @st.cache_resource(show_spinner=False)
@@ -86,18 +99,23 @@ def load_image(uploaded_file) -> Image.Image:
     return image.convert("RGB")
 
 
-def generate_caption(image: Image.Image, captioner) -> str:
+def generate_caption(image: Image.Image, processor, model) -> str:
     """Describe the contents of an image with the BLIP captioning model.
 
     Args:
         image: The picture uploaded by the user.
-        captioner: The loaded Hugging Face image-to-text pipeline.
+        processor: The BLIP processor that prepares inputs for the model.
+        model: The BLIP conditional generation model.
 
     Returns:
         str: A short English caption, e.g. "a dog sitting on the grass".
     """
-    results = captioner(image)
-    caption = results[0]["generated_text"]
+    inputs = processor(images=image, return_tensors="pt")
+
+    with torch.no_grad():
+        output_ids = model.generate(**inputs, max_new_tokens=50)
+
+    caption = processor.batch_decode(output_ids, skip_special_tokens=True)[0]
     caption = re.sub(r"\s+", " ", caption).strip()
     return caption
 
@@ -307,8 +325,8 @@ def main() -> None:
         # Step 1 – caption the image
         with st.spinner("🔍 Looking closely at your picture..."):
             try:
-                captioner = load_captioning_pipeline()
-                caption = generate_caption(image, captioner)
+                processor, caption_model = load_captioning_model()
+                caption = generate_caption(image, processor, caption_model)
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Image captioning failed: {exc}")
                 st.stop()
